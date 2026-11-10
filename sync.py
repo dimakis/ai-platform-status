@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -146,38 +147,42 @@ def fetch_version_tag(repository: str, version: str) -> dict | None:
     """Look up a specific version tag on a Quay repository."""
     namespace, name = quay_namespace(repository)
     base = f"https://quay.io/api/v1/repository/{namespace}/{name}/tag/"
-    data = fetch_json(f"{base}?specificTag={version}&limit=1")
+    data = fetch_json(f"{base}?specificTag={version}&limit=1&onlyActiveTags=true")
     tags = (data or {}).get("tags") or []
-    return tags[0] if tags else None
+    return next((tag for tag in tags if tag.get("name") == version), None)
 
 
 def fetch_releases(repo: str, headers: dict[str, str]) -> list[dict]:
-    """Fetch version tags from a GitHub repo, returning rhaiv releases."""
-    import re
-
-    payload = fetch_json(
-        f"https://api.github.com/repos/{repo}/tags?per_page=100",
-        headers,
-    )
-    if payload is None:
-        return []
+    """Fetch rhaiv release tags, sorted by numeric version across all pages."""
     releases = []
-    for tag_obj in payload:
-        name = tag_obj.get("name") or ""
-        match = re.match(r"v(\d+\.\d+\.\d+)-rhaiv\.(\d+)", name)
-        if not match:
-            continue
-        upstream_version = match.group(1)
-        rhaiv_number = int(match.group(2))
-        releases.append(
-            {
-                "tag": name,
-                "upstreamVersion": upstream_version,
-                "rhaivNumber": rhaiv_number,
-                "commitSha": tag_obj.get("commit", {}).get("sha"),
-            }
+    page = 1
+    while True:
+        payload = fetch_json(
+            f"https://api.github.com/repos/{repo}/tags?per_page=100&page={page}",
+            headers,
         )
-    releases.sort(key=lambda r: (r["upstreamVersion"], r["rhaivNumber"]), reverse=True)
+        if payload is None:
+            raise RuntimeError(f"GitHub release repository not found: {repo}")
+        for tag_obj in payload:
+            name = tag_obj.get("name") or ""
+            match = re.fullmatch(r"v(\d+\.\d+\.\d+)-rhaiv\.(\d+)", name)
+            if not match:
+                continue
+            releases.append(
+                {
+                    "tag": name,
+                    "upstreamVersion": match.group(1),
+                    "rhaivNumber": int(match.group(2)),
+                    "commitSha": tag_obj.get("commit", {}).get("sha"),
+                }
+            )
+        if len(payload) < 100:
+            break
+        page += 1
+    releases.sort(
+        key=lambda r: (tuple(map(int, r["upstreamVersion"].split("."))), r["rhaivNumber"]),
+        reverse=True,
+    )
     return releases
 
 
@@ -193,7 +198,7 @@ def correlate_releases(
     for rel in releases[:limit]:
         tag_name = rel["tag"]
         components = []
-        all_found = True
+        all_found = bool(release_images)
         for img in release_images:
             repo = img["repository"]
             quay_tag = fetch_version_tag(repo, tag_name)

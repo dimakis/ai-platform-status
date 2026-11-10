@@ -1,15 +1,22 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sync import (  # noqa: E402
     build_status,
+    collect,
+    correlate_releases,
+    fetch_releases,
+    fetch_version_tag,
     is_detail_tag,
     is_noise_tag,
     select_build_tags,
     select_channels,
+    load_catalog,
+    CATALOG_PATH,
 )
 
 
@@ -157,6 +164,72 @@ class StatusAssemblyTest(unittest.TestCase):
         self.assertEqual(workflows[1]["status"], "missing")
         self.assertEqual(image["pullTag"], "odh-stable")
         self.assertEqual(status["products"][0]["docs"], [])
+
+
+class ReleaseDiscoveryTest(unittest.TestCase):
+    @patch("sync.fetch_json")
+    def test_release_versions_sort_numerically_and_exclude_non_release_tags(self, fetch):
+        fetch.return_value = [
+            {"name": name, "commit": {"sha": name}}
+            for name in [
+                "v0.1.9-rhaiv.9", "v0.1.10-rhaiv.2", "v0.1.10-rhaiv.10",
+                "v0.2.0-rhaiv.0", "v0.1.7", "v0.1.10-rhaiv.11.prefetch",
+            ]
+        ]
+        releases = fetch_releases("opendatahub-io/openshell", {})
+        self.assertEqual(
+            [release["tag"] for release in releases],
+            ["v0.2.0-rhaiv.0", "v0.1.10-rhaiv.10", "v0.1.10-rhaiv.2", "v0.1.9-rhaiv.9"],
+        )
+
+    @patch("sync.fetch_json")
+    def test_release_discovery_continues_past_a_page_of_unrelated_tags(self, fetch):
+        fetch.side_effect = [
+            [{"name": f"unrelated-{i}"} for i in range(100)],
+            [{"name": "v0.1.6-rhaiv.4", "commit": {"sha": "midstream"}}],
+        ]
+        releases = fetch_releases("opendatahub-io/openshell", {})
+        self.assertEqual(releases[0]["tag"], "v0.1.6-rhaiv.4")
+        self.assertIn("page=2", fetch.call_args.args[0])
+
+    @patch("sync.fetch_json", return_value=None)
+    def test_missing_release_repository_is_an_error(self, fetch):
+        with self.assertRaisesRegex(RuntimeError, "release repository not found"):
+            fetch_releases("opendatahub-io/missing", {})
+
+    @patch("sync.fetch_json")
+    def test_version_lookup_requires_an_exact_active_tag(self, fetch):
+        fetch.return_value = {"tags": [{"name": "odh-stable"}]}
+        self.assertIsNone(fetch_version_tag("quay.io/opendatahub/gateway", "v0.1.7-rhaiv.0"))
+        self.assertIn("onlyActiveTags=true", fetch.call_args.args[0])
+
+    @patch("sync.fetch_version_tag")
+    def test_partial_release_and_empty_component_list_are_not_all_built(self, fetch):
+        release = {"tag": "v0.1.6-rhaiv.4", "upstreamVersion": "0.1.6", "rhaivNumber": 4}
+        images = [
+            {"name": "Gateway", "repository": "quay.io/opendatahub/gateway", "release": True},
+            {"name": "CLI", "repository": "quay.io/opendatahub/cli", "release": True},
+        ]
+        fetch.side_effect = [{"manifest_digest": "sha256:gateway"}, None]
+        result = correlate_releases([release], images, {})[0]
+        self.assertFalse(result["allBuilt"])
+        self.assertTrue(result["components"][0]["found"])
+        self.assertFalse(result["components"][1]["found"])
+        self.assertFalse(correlate_releases([release], [], {})[0]["allBuilt"])
+
+    def test_openshell_catalog_discovers_public_images_from_midstream(self):
+        catalog = load_catalog(CATALOG_PATH)
+        release = {"tag": "v0.1.6-rhaiv.4", "upstreamVersion": "0.1.6", "rhaivNumber": 4}
+        with (
+            patch("sync.github_headers", return_value={}),
+            patch("sync.fetch_image_tags", return_value=[]),
+            patch("sync.fetch_workflow_index", return_value={}),
+            patch("sync.fetch_releases", side_effect=lambda repo, headers: [release] if repo == "opendatahub-io/openshell" else []),
+            patch("sync.fetch_version_tag", return_value={"manifest_digest": "sha256:built"}),
+        ):
+            product = collect(catalog)["products"][0]
+        self.assertEqual(product["releases"][0]["tag"], "v0.1.6-rhaiv.4")
+        self.assertTrue(product["releases"][0]["allBuilt"])
 
 
 if __name__ == "__main__":

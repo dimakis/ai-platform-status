@@ -253,10 +253,6 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
-.e2e-banner.e2e-ok {
-  border-left: 4px solid var(--ok);
-}
-
 .e2e-banner-title {
   display: flex;
   align-items: center;
