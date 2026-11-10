@@ -39,6 +39,12 @@ function statusPill(workflow) {
   return ["No data", "pill-neutral"];
 }
 
+function repositoryLabel(repo) {
+  if (repo.startsWith("opendatahub-io/")) return `ODH midstream · ${repo}`;
+  if (repo.startsWith("red-hat-data-services/")) return `RHDS downstream · ${repo}`;
+  return repo;
+}
+
 /* ── Pagination ─────────────────────────────────────────────────────── */
 
 const PAGE_SIZE = 6;
@@ -91,11 +97,25 @@ function cmdBlock(value) {
 
 let catalog = null;
 let liveData = null;
+let liveDataError = false;
+
+async function fetchJson(path) {
+  const response = await fetch(path, { cache: "no-store" });
+  if (!response.ok) throw new Error(`GET ${path} failed: HTTP ${response.status}`);
+  return response.json();
+}
 
 async function loadData() {
+  liveDataError = false;
   const [cat, live] = await Promise.all([
-    fetch("products.json", { cache: "no-store" }).then(r => r.json()),
-    fetch("data/status.json", { cache: "no-store" }).then(r => r.json()).catch(() => null),
+    fetchJson("products.json"),
+    fetchJson("data/status.json").catch(error => {
+      liveDataError = true;
+      console.error("Live status unavailable", {
+        stage: "load_status", code: "STATUS_LOAD_FAILED", resource: "data/status.json", cause: error,
+      });
+      return null;
+    }),
   ]);
   catalog = cat;
   liveData = live;
@@ -127,6 +147,8 @@ function buildNav() {
   });
   if (liveData?.generatedAt) {
     syncEl.textContent = "Synced " + formatDate(liveData.generatedAt);
+  } else if (liveDataError) {
+    syncEl.textContent = "Status unavailable";
   }
 }
 
@@ -202,7 +224,7 @@ function renderHero(p) {
   const actions = el("div", "hero-actions");
   const primaryDoc = (p.docs || []).find(d => d.url);
   if (primaryDoc) actions.append(extLink(primaryDoc.url, "Get started →", "btn btn-primary"));
-  if (p.source) actions.append(extLink(p.source, "Source code", "btn btn-secondary"));
+  if (p.source) actions.append(extLink(p.source, p.sourceLabel || "Source code", "btn btn-secondary"));
   hero.append(actions);
   return hero;
 }
@@ -218,17 +240,17 @@ function renderE2eBanner(live) {
 
   const banner = el("div", "e2e-banner");
   const title = el("div", "e2e-banner-title");
-  title.append(el("strong", null, "E2E Tests"));
+  title.append(el("strong", null, "E2E test image"));
 
   if (e2eImg) {
     const hasStable = e2eImg.pull != null;
     if (hasStable) {
-      title.append(el("span", "pill pill-ok", "Passing"));
-      banner.classList.add("e2e-ok");
+      title.append(el("span", "pill pill-info", "Image available"));
     } else {
-      title.append(el("span", "pill pill-warn", "Unknown"));
+      title.append(el("span", "pill pill-neutral", "No stable tag"));
     }
     banner.append(title);
+    banner.append(el("p", "e2e-details", "Image availability only. Workflow results below are separate runs, not validation of these image digests."));
 
     const details = el("div", "e2e-details");
     if (e2eImg.lastModified) {
@@ -254,7 +276,7 @@ function renderE2eBanner(live) {
       banner.append(recent);
     }
   } else {
-    title.append(el("span", "pill pill-neutral", "Not found"));
+    title.append(el("span", "pill pill-neutral", "No image data"));
     banner.append(title);
   }
 
@@ -265,8 +287,7 @@ function renderE2eBanner(live) {
       const [label, cls] = statusPill(wf);
       row.append(el("span", "pill " + cls, label));
       row.append(el("span", "e2e-gate-name", `${wf.name}`));
-      const repoShort = wf.repo.split("/").pop();
-      row.append(el("span", "e2e-gate-repo", repoShort));
+      row.append(el("span", "e2e-gate-repo", repositoryLabel(wf.repo)));
       if (wf.updatedAt) row.append(el("span", "e2e-gate-time", formatDate(wf.updatedAt)));
       if (wf.url) row.append(extLink(wf.url, "View", "e2e-gate-link"));
       gates.append(row);
@@ -289,7 +310,7 @@ function renderReleaseList(releases, page) {
     title.append(el("strong", null, `OpenShell ${rel.upstreamVersion}`));
     title.append(el("span", "release-tag", rel.tag));
     header.append(title);
-    const pillText = rel.allBuilt ? "All built" : "Partial";
+    const pillText = rel.allBuilt ? "Images available" : "Images incomplete";
     const pillCls = rel.allBuilt ? "pill pill-ok" : "pill pill-warn";
     header.append(el("span", pillCls, pillText));
     row.append(header);
@@ -324,13 +345,20 @@ function renderReleaseList(releases, page) {
 
 function renderReleases(product, live) {
   const section = el("div", "section");
+  section.append(el("h2", null, "Version releases"));
+  section.append(el("p", "section-lead", "Version-tagged ODH midstream images. An upstream release appears here after an ODH release tag is created; each component is then checked in Quay. Image availability does not establish deployment validation."));
+  if (product.releaseRepo) {
+    section.append(extLink(`https://github.com/${product.releaseRepo}/tags`, "ODH midstream release tags →", "doc-open"));
+  }
+  if (!live) {
+    section.append(el("p", "section-lead", "Release data unavailable."));
+    return section;
+  }
   const releases = live?.releases || [];
   if (!releases.length) {
     section.append(el("p", "section-lead", "No version-tagged releases found."));
     return section;
   }
-  section.append(el("h2", null, "Version releases"));
-  section.append(el("p", "section-lead", "Version-tagged builds across core components, built through the Konflux pipeline."));
   section.append(renderReleaseList(releases, 1));
   return section;
 }
@@ -431,7 +459,7 @@ function renderStatus(product, live) {
   }
 
   section.append(el("h2", null, "CI status"));
-  section.append(el("p", "section-lead", "Public GitHub Actions workflows across downstream and upstream repositories."));
+  section.append(el("p", "section-lead", "Public GitHub Actions workflows from ODH midstream and RHDS downstream. These runs are not tied to the image digests shown on this page."));
 
   const groups = new Map();
   for (const wf of workflows) {
@@ -447,7 +475,7 @@ function renderStatus(product, live) {
     pane.id = "status-sub-pane";
 
     repos.forEach((repo, i) => {
-      const btn = el("button", "sub-tab-btn", repo);
+      const btn = el("button", "sub-tab-btn", repositoryLabel(repo));
       btn.dataset.repo = repo;
       btn.type = "button";
       if (i === 0) btn.classList.add("active");
@@ -470,7 +498,7 @@ function renderStatus(product, live) {
     section.append(pane);
   } else if (repos.length === 1) {
     const groupLabel = el("div", "check-group-label");
-    groupLabel.append(extLink(`https://github.com/${repos[0]}/actions`, repos[0], null));
+    groupLabel.append(extLink(`https://github.com/${repos[0]}/actions`, repositoryLabel(repos[0]), null));
     section.append(groupLabel);
     const paneId = "wf-" + repos[0].replace(/\//g, "-");
     section.append(renderWorkflowPage(groups.get(repos[0]), 1, paneId));
@@ -488,7 +516,8 @@ function renderInstallGrid(downloads, page) {
     const card = el("div", "card");
     card.append(el("h3", null, dl.title));
     if (dl.detail) card.append(el("p", null, dl.detail));
-    card.append(cmdBlock(dl.value));
+    if (dl.value) card.append(cmdBlock(dl.value));
+    if (dl.url) card.append(extLink(dl.url, "Open guide →", "doc-open"));
     grid.append(card);
   }
   container.append(grid);
@@ -502,7 +531,7 @@ function renderInstallGrid(downloads, page) {
 function renderInstall(p) {
   const section = el("div", "section");
   section.append(el("h2", null, "Install"));
-  section.append(el("p", "section-lead", "Choose the method that fits your environment."));
+  section.append(el("p", "section-lead", "Start with the OpenShift walkthrough. Its pinned versions and experimental test-cluster setup are separate from the newest image builds listed here."));
   if (p.requirements) {
     const req = el("div", "requirements");
     req.append(el("strong", null, "Requirements: "));
@@ -547,6 +576,11 @@ function renderProduct(p) {
   const live = liveProduct(p.key);
   const fragment = document.createDocumentFragment();
   fragment.append(renderHero(p));
+  if (liveDataError) {
+    const notice = el("p", "requirements", "Live image, CI, and release status is unavailable. Documentation and install links remain available.");
+    notice.setAttribute("role", "alert");
+    fragment.append(notice);
+  }
   fragment.append(renderTabs(p, live));
   const pane = el("div", null);
   pane.id = "tab-pane";
@@ -567,6 +601,12 @@ function renderProduct(p) {
     const initial = hash && (catalog?.products || []).find(p => p.key === hash) ? hash : first?.key;
     if (initial) selectProduct(initial);
   } catch (err) {
-    contentInner.innerHTML = `<div class="splash"><h1>Could not load</h1><p>${err.message}</p></div>`;
+    console.error("Page initialization failed", {
+      stage: "initialize_page", code: "PAGE_INIT_FAILED", cause: err,
+    });
+    const splash = el("div", "splash");
+    splash.append(el("h1", null, "Could not load"));
+    splash.append(el("p", null, "The page could not be loaded. Please try again later."));
+    contentInner.replaceChildren(splash);
   }
 })();

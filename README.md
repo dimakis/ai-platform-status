@@ -7,6 +7,22 @@ GitHub Actions, install commands, and documentation links.
 The site is a single-page app with a persistent sidebar listing every product.
 Adding a new product means adding an entry to `products.json` and running sync.
 
+## OpenShell sources
+
+- **Getting started:** [Agent Ops on OpenShift](https://github.com/opendatahub-io/agent-ops/blob/main/guides/getting-started-openshell-openshift.md).
+  Follow the guide's pinned versions and prerequisites. It describes an
+  experimental installation for isolated test clusters; its examples do not
+  validate the newest images on this site.
+- **ODH midstream:** [opendatahub-io/openshell](https://github.com/opendatahub-io/openshell)
+  supplies the release tags matched against public `quay.io/opendatahub` images.
+- **RHDS downstream:** [red-hat-data-services/openshell](https://github.com/red-hat-data-services/openshell)
+  is a separate source. Its workflow results are labeled separately from ODH.
+
+The Releases tab discovers `vX.Y.Z-rhaiv.N` tags from ODH midstream and checks
+the four core images in Quay. An NVIDIA upstream release alone does not create
+an ODH release entry. Published images, test-image availability, and independent
+CI runs do not prove that a particular image set passed deployment validation.
+
 ## Quick start
 
 ```bash
@@ -43,8 +59,18 @@ Only public APIs — no credentials stored, no OAuth proxy, no private registrie
 Required fields: `key`, `name`. Everything else (images, workflows, docs,
 downloads) is optional but makes the page useful.
 
+The first documentation link is the hero's **Get started** target. Download
+cards may contain a copyable `value`, a guide `url`, or both. `sourceLabel`
+optionally labels the source-code button.
+
 ## Tests
 
 ```bash
 python3 -m unittest discover tests/ -v
+node --check app.js
+node --test tests/test_app.mjs
 ```
+
+Tests run on pull requests without contacting registries or inference providers.
+If the live status snapshot cannot be loaded, the page keeps the guides usable,
+shows that status is unavailable, and logs a structured diagnostic in the console.
